@@ -24,9 +24,6 @@ esac
 convert "$TDIR/s.png" -resize 1024x1024\> "$FPATH" 2>/dev/null || cp "$TDIR/s.png" "$FPATH"
 
 MODEL="${VISION_MODEL:-qwen2.5vl:7b}"
-if ! ollama show "$MODEL" &>/dev/null; then
-  MODEL="llava:7b"
-fi
 
 echo "$FPATH" > /tmp/opencode-latest-ss-path
 echo "Screen capture: $FPATH"
@@ -38,13 +35,11 @@ import base64, json, urllib.request, os
 with open(os.environ['PYPATH'], 'rb') as f:
     b64 = base64.b64encode(f.read()).decode()
 
-num_ctx = 4096 if os.environ['PYMODEL'].startswith('qwen') else 2048
-
 payload = json.dumps({
     'model': os.environ['PYMODEL'],
     'prompt': os.environ['PYPROMPT'],
     'stream': False,
-    'options': {'num_ctx': num_ctx},
+    'options': {'num_ctx': 4096},
     'images': [b64]
 }).encode()
 

@@ -1,25 +1,23 @@
 # OpenVist
 
-Local screen capture and AI vision analysis for Wayland/Hyprland.
+Captura de pantalla remota + análisis con IA local para Wayland/Hyprland.
 
-Takes a screenshot, sends it to a local vision model (via Ollama), and returns a detailed description. Designed for Discord bot integration via the `/see` command.
+**Caso de uso real:** Poder ver el escritorio de mi PC desde fuera de casa mientras codeo. Uso OpenCode vía Discord (remote-opencode bot), le pido que ejecute `opencode-see`, y el bot me envía la descripción + la imagen de la pantalla directamente al chat de Discord. Sin servicios cloud, sin enviar datos a terceros.
 
-## Requirements
+## Requisitos
 
-- **Wayland compositor** (Hyprland recommended)
-- **grim** + **slurp** — screenshot tools
-- **ImageMagick** (`convert`) — image resizing
-- **Ollama** — local LLM server
-- **Python 3** — vision model client
-- **systemd (user)** — cleanup timer (optional)
+- **Wayland** (Hyprland)
+- **grim** + **slurp** — captura de pantalla
+- **ImageMagick** (`convert`) — redimensionado
+- **Ollama** — servidor de modelos local
+- **Python 3**
 
-Install dependencies:
 ```bash
 sudo pacman -S grim slurp imagemagick python hyprutils
 curl -fsSL https://ollama.com/install.sh | sh
 ```
 
-## Quick Install
+## Instalación
 
 ```bash
 git clone https://github.com/VECTORG99/OpenVist.git
@@ -28,103 +26,61 @@ chmod +x install.sh
 ./install.sh
 ```
 
-The installer will:
-1. Copy `opencode-see` to `~/.local/bin/`
-2. Set up the systemd cleanup timer
-3. Prompt for the vision model to download
-4. Help configure monitor names
-
-## Usage
+## Uso
 
 ```bash
-# Full screen (both monitors)
+# Ambas pantallas
 opencode-see full
 
-# Single monitor
+# Una pantalla (mejor calidad, más detalle para texto)
 LEFT_MON=DP-2 RIGHT_MON=DP-3 opencode-see left
 LEFT_MON=DP-2 RIGHT_MON=DP-3 opencode-see right
 
-# Region select (click and drag)
+# Seleccionar área
 opencode-see region
 
-# Active window
+# Ventana activa
 opencode-see window
 
-# Custom prompt
-opencode-see full "Find and read any error messages on screen"
+# Prompt personalizado
+opencode-see full "Busca errores o mensajes importantes en la pantalla"
 ```
 
-### Environment Variables
+### Variables de entorno
 
-| Variable | Default | Description |
+| Variable | Por defecto | Descripción |
 |---|---|---|
-| `LEFT_MON` | `DP-2` | Left monitor name (from `hyprctl monitors`) |
-| `RIGHT_MON` | `DP-3` | Right monitor name |
-| `VISION_MODEL` | `qwen2.5vl:7b` | Ollama vision model to use |
+| `LEFT_MON` | — | Nombre del monitor izquierdo (`hyprctl monitors`) |
+| `RIGHT_MON` | — | Nombre del monitor derecho |
+| `VISION_MODEL` | `qwen2.5vl:7b` | Modelo de visión en Ollama |
 
-### Output
+### Salida
 
-The script prints:
-1. `Screen capture: /home/user/Pictures/opencode-ss/ss-20260614-120000.jpg`
-2. The AI-generated description of what is on screen
+El script imprime la ruta de la captura y la descripción del modelo de visión. La ruta también se guarda en `/tmp/opencode-latest-ss-path` para integración con bots.
 
-The screenshot path is also written to `/tmp/opencode-latest-ss-path` for bot integration.
+## Integración con Discord (remote-opencode)
 
-## Discord Bot Integration
+Agregué el comando `/see` al bot `remote-opencode` para usarlo así en Discord:
 
-Add `see-command.js` to your Discord.js bot's command directory and register it in your command index.
+```
+/see mode:left
+```
 
-The `/see` slash command provides:
+El bot ejecuta `opencode-see` en mi PC, recibe la descripción del modelo de visión, y me envía tanto el texto como la imagen adjunta al chat. Todo local, nada sale de mi red.
 
-- `/see mode:both` — capture both monitors
-- `/see mode:left` — left monitor only (higher detail)
-- `/see mode:right` — right monitor only (higher detail)
-- `/see mode:region` — click-and-drag selection
-- `/see mode:window` — active window only
+El archivo `see-command.js` es el código de referencia para agregar el comando a cualquier bot de Discord.js.
 
-The bot sends the AI description as text plus the screenshot image as a Discord attachment.
+## Limpieza automática
 
-## Auto-Cleanup
-
-Screenshots are saved to `~/Pictures/opencode-ss/`. A systemd user timer deletes files older than 5 minutes:
+Las capturas se guardan en `~/Pictures/opencode-ss/`. Un timer de systemd borra archivos con más de 5 minutos:
 
 ```bash
-# Check timer status
 systemctl --user status opencode-ss-clean.timer
-
-# Trigger cleanup manually
-systemctl --user start opencode-ss-clean.service
 ```
 
-## Available Vision Models
+## Seguridad
 
-| Model | Size | Quality |
-|---|---|---|
-| `qwen2.5vl:7b` | 6.0 GB | Excellent — reads text, detailed |
-| `llava:7b` | 4.5 GB | Good |
-| `moondream` | 1.6 GB | Fast but basic |
-
-Smaller text is better readable when capturing a single monitor (`left` / `right` mode) at full resolution.
-
-## Security
-
-- **100% local** — no data leaves your machine
-- Screenshots auto-delete after 5 minutes
-- Uses Ollama API on `127.0.0.1:11434`
-- No cloud services, no API keys required
-
-## File Structure
-
-```
-OpenVist/
-├── opencode-see              Main screenshot + vision script
-├── see-command.js            Discord.js bot command reference
-├── opencode-ss-clean.service systemd cleanup service
-├── opencode-ss-clean.timer   systemd cleanup timer
-├── install.sh                Installation script
-└── README.md                 This file
-```
-
-## License
-
-MIT
+- **100% local** — modelo de visión en Ollama (127.0.0.1:11434)
+- Sin API keys, sin cuentas cloud, sin enviar imágenes a nadie
+- Capturas se autoeliminan a los 5 minutos
+- Ideal para debugging remoto sin exponer tu pantalla a servicios externos
