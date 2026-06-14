@@ -1,0 +1,6 @@
+[Unit]
+Description=Clean opencode screenshots older than 5 minutes
+
+[Service]
+Type=oneshot
+ExecStart=find %h/Pictures/opencode-ss -type f -mmin +5 -delete

@@ -1,0 +1,48 @@
+# OS
+.DS_Store
+.DS_Store?
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# Logs
+*.log
+*.trace
+
+# Secrets / config (DO NOT COMMIT)
+.env
+.env.*
+auth.json
+*.token
+credentials*
+secrets*
+config.local.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+*.egg
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+
+# Screenshots (auto-deleted anyway)
+Pictures/opencode-ss/
