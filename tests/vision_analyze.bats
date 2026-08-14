@@ -28,13 +28,44 @@ load test_helper
 }
 
 @test "vision_analyze.py accepts an image path and prompt argument" {
-    # We cannot reach a real Ollama in CI, but we can verify the script gets
-    # past argument parsing and image loading, then fails on the network call
-    # with a clear "cannot reach Ollama" message.
+    # Point Ollama at an unreachable port so the script always fails on the
+    # network call with a clear "cannot reach Ollama" message, regardless of
+    # whether a real Ollama is running on the host.
     local img
     img="$(make_test_image)"
-    run python3 "$VISION_PY" "$img" "describe this"
+    run env OLLAMA_URL="http://127.0.0.1:1" python3 "$VISION_PY" "$img" "describe this"
     [ "$status" -ne 0 ]
     [[ "$output" == *"Ollama"* ]]
+    rm -f "$img"
+}
+
+@test "vision_analyze.py comparison mode loads both images before failing" {
+    local img1 img2
+    img1="$(make_test_image "$BATS_TMPDIR/cmp1.png")"
+    img2="$(make_test_image "$BATS_TMPDIR/cmp2.png")"
+    run env OLLAMA_URL="http://127.0.0.1:1" OPENVIST_COMPARE_IMAGE="$img2" \
+        python3 "$VISION_PY" "$img1" "what changed"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Ollama"* ]]
+    rm -f "$img1" "$img2"
+}
+
+@test "vision_analyze.py comparison mode errors on missing second image" {
+    local img
+    img="$(make_test_image)"
+    run env OPENVIST_COMPARE_IMAGE="/nonexistent/second.png" python3 "$VISION_PY" "$img" "compare"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"image file not found"* ]]
+    rm -f "$img"
+}
+
+@test "vision_analyze.py banner is not printed when OPENVIST_BANNER unset" {
+    # Confirm the env var path does not crash with a traceback; the script
+    # fails on the unreachable Ollama before printing any banner.
+    local img
+    img="$(make_test_image)"
+    run env -u OPENVIST_BANNER OLLAMA_URL="http://127.0.0.1:1" \
+        python3 "$VISION_PY" "$img" "describe"
+    [ "$status" -ne 0 ]
     rm -f "$img"
 }

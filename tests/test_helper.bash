@@ -18,6 +18,10 @@ export SEE_SCRIPT
 VISION_PY="$PROJECT_ROOT/vision_analyze.py"
 export VISION_PY
 
+# The prompts directory.
+PROMPTS_DIR="$PROJECT_ROOT/prompts"
+export PROMPTS_DIR
+
 # Create a tiny valid PNG (1x1) for tests that need an image file.
 make_test_image() {
     local out="${1:-$BATS_TMPDIR/test.png}"

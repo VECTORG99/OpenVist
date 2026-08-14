@@ -52,3 +52,35 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" == *"RIGHT_MON"* ]]
 }
+
+@test "opencode-see --list-models runs and prints header" {
+    run "$SEE_SCRIPT" --list-models
+    [[ "$output" == *"Available Ollama models"* ]]
+}
+
+@test "opencode-see --help documents new flags" {
+    run "$SEE_SCRIPT" --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--list-models"* ]]
+    [[ "$output" == *"--prompt-template"* ]]
+    [[ "$output" == *"--annotate"* ]]
+    [[ "$output" == *"--compare"* ]]
+}
+
+@test "opencode-see --prompt-template with unknown name errors" {
+    run "$SEE_SCRIPT" --prompt-template notarealtemplate
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"prompt template 'notarealtemplate' not found"* ]]
+}
+
+@test "opencode-see --prompt-template without value errors" {
+    run "$SEE_SCRIPT" --prompt-template
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--prompt-template requires a template name"* ]]
+}
+
+@test "opencode-see --compare without value errors" {
+    run "$SEE_SCRIPT" --compare
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--compare requires a path"* ]]
+}
