@@ -1,53 +1,387 @@
 #!/bin/bash
-set -e
+#
+# opencode-see — Wayland/Hyprland screenshot + local AI vision analysis.
+#
+# Captures a screenshot (full / monitor / region / window) with grim, resizes
+# it with ImageMagick, then asks a local Ollama vision model to describe it.
+#
+# Usage:
+#   opencode-see [full|left|right|region|window] [prompt...]
+#   opencode-see --check
+#   opencode-see --version
+#   opencode-see --help
+#
+# Configuration: see config.example.json. Environment variables override config.
+#
+set -euo pipefail
+
+VERSION="1.1.0"
+readonly VERSION
+
+# --- defaults (overridden by config file then env vars) --------------------
+OPENVIST_MODEL="qwen2.5vl:7b"
+OPENVIST_RESIZE="1024x1024>"
+OPENVIST_TIMEOUT=120
+OPENVIST_OLLAMA_URL="http://127.0.0.1:11434"
+OPENVIST_NUM_CTX=4096
+OPENVIST_SS_DIR="$HOME/Pictures/opencode-ss"
+OPENVIST_LOG_FILE="$HOME/.local/share/opencode-see.log"
+
+# Save original environment overrides before config loading overwrites them.
+_ENV_MODEL="${OPENVIST_MODEL:-}"
+_ENV_RESIZE="${OPENVIST_RESIZE:-}"
+_ENV_TIMEOUT="${OPENVIST_TIMEOUT:-}"
+_ENV_OLLAMA_URL="${OPENVIST_OLLAMA_URL:-}"
+_ENV_NUM_CTX="${OPENVIST_NUM_CTX:-}"
+_ENV_SS_DIR="${OPENVIST_SS_DIR:-}"
+_ENV_LOG_FILE="${OPENVIST_LOG_FILE:-}"
+_ENV_VISION_MODEL="${VISION_MODEL:-}"
+_ENV_OLLAMA_URL_ALIAS="${OLLAMA_URL:-}"
+_ENV_VISION_TIMEOUT="${VISION_TIMEOUT:-}"
+_ENV_VISION_NUM_CTX="${VISION_NUM_CTX:-}"
+
+# --- helpers ---------------------------------------------------------------
+VERBOSE=0
+
+log() {
+    # log <level> <message>
+    local level="$1"; shift
+    local msg="$*"
+    local ts
+    ts="$(date '+%Y-%m-%d %H:%M:%S')"
+    local line="[$ts] [$level] $msg"
+    mkdir -p "$(dirname "$OPENVIST_LOG_FILE")" 2>/dev/null || true
+    echo "$line" >> "$OPENVIST_LOG_FILE" 2>/dev/null || true
+    if [[ "$VERBOSE" -eq 1 || "$level" == "ERROR" ]]; then
+        echo "$line" >&2
+    fi
+}
+
+die() {
+    # die <message>
+    log "ERROR" "$*"
+    exit 1
+}
+
+# Expand a leading ~ in a path value.
+expand_tilde() {
+    local v="$1"
+    if [[ "$v" == "~"* ]]; then
+        v="${v/#\~/$HOME}"
+    fi
+    printf '%s' "$v"
+}
+
+# Load JSON config file if present. Uses python3 for parsing (already a dep).
+load_config() {
+    local cfg
+    # XDG config dir takes precedence, then repo-local, then ~/.config.
+    for cfg in \
+        "${XDG_CONFIG_HOME:-$HOME/.config}/opencode-see/config.json" \
+        "$HOME/.config/opencode-see/config.json" \
+        "$(dirname "$(readlink -f "$0")")/config.json"; do
+        [[ -f "$cfg" ]] || continue
+        while IFS='=' read -r key val; do
+            [[ -n "$key" ]] || continue
+            val="${val%\"}"; val="${val#\"}"
+            case "$key" in
+                model)        OPENVIST_MODEL="$val" ;;
+                resize_target) OPENVIST_RESIZE="$val" ;;
+                timeout)      OPENVIST_TIMEOUT="$val" ;;
+                ollama_url)   OPENVIST_OLLAMA_URL="$val" ;;
+                num_ctx)      OPENVIST_NUM_CTX="$val" ;;
+                screenshot_dir) OPENVIST_SS_DIR="$(expand_tilde "$val")" ;;
+                log_file)     OPENVIST_LOG_FILE="$(expand_tilde "$val")" ;;
+            esac
+        done < <(python3 -c "
+import json,sys
+try:
+    d=json.load(open('$cfg'))
+except Exception as e:
+    sys.stderr.write('config parse error: %s\n'%e); sys.exit(0)
+for k,v in d.items():
+    print('%s=%s'%(k,v))
+" 2>/dev/null)
+        log "INFO" "loaded config from $cfg"
+        return 0
+    done
+}
+
+# Apply environment-variable overrides (these win over config file).
+apply_env_overrides() {
+    [[ -n "$_ENV_VISION_MODEL" ]]   && OPENVIST_MODEL="$_ENV_VISION_MODEL"
+    [[ -n "$_ENV_MODEL" ]]          && OPENVIST_MODEL="$_ENV_MODEL"
+    [[ -n "$_ENV_RESIZE" ]]         && OPENVIST_RESIZE="$_ENV_RESIZE"
+    [[ -n "$_ENV_VISION_TIMEOUT" ]] && OPENVIST_TIMEOUT="$_ENV_VISION_TIMEOUT"
+    [[ -n "$_ENV_TIMEOUT" ]]        && OPENVIST_TIMEOUT="$_ENV_TIMEOUT"
+    [[ -n "$_ENV_OLLAMA_URL_ALIAS" ]] && OPENVIST_OLLAMA_URL="$_ENV_OLLAMA_URL_ALIAS"
+    [[ -n "$_ENV_OLLAMA_URL" ]]     && OPENVIST_OLLAMA_URL="$_ENV_OLLAMA_URL"
+    [[ -n "$_ENV_VISION_NUM_CTX" ]] && OPENVIST_NUM_CTX="$_ENV_VISION_NUM_CTX"
+    [[ -n "$_ENV_NUM_CTX" ]]        && OPENVIST_NUM_CTX="$_ENV_NUM_CTX"
+    [[ -n "$_ENV_SS_DIR" ]]         && OPENVIST_SS_DIR="$_ENV_SS_DIR"
+    [[ -n "$_ENV_LOG_FILE" ]]       && OPENVIST_LOG_FILE="$_ENV_LOG_FILE"
+}
+
+# --- health check ----------------------------------------------------------
+check_health() {
+    local rc=0
+    echo "== OpenVist health check =="
+
+    local deps=(grim slurp hyprctl python3 ollama)
+    local have_magick=0
+    if command -v magick &>/dev/null; then
+        have_magick=1
+        deps+=(magick)
+    elif command -v convert &>/dev/null; then
+        have_magick=1
+        deps+=(convert)
+    fi
+
+    for dep in "${deps[@]}"; do
+        if command -v "$dep" &>/dev/null; then
+            echo "  [ok]   $dep"
+        else
+            echo "  [FAIL] $dep — not found"
+            rc=1
+        fi
+    done
+
+    if [[ "$have_magick" -eq 0 ]]; then
+        echo "  [FAIL] ImageMagick (magick/convert) — not found"
+        rc=1
+    fi
+
+    # Ollama reachable + model available (uses python3, already a dependency).
+    apply_env_overrides
+    local check_out
+    check_out="$(OPENVIST_OLLAMA_URL="$OPENVIST_OLLAMA_URL" \
+        OPENVIST_MODEL="$OPENVIST_MODEL" python3 -c "
+import json, os, sys, urllib.request
+url = os.environ['OPENVIST_OLLAMA_URL'].rstrip('/') + '/api/tags'
+try:
+    with urllib.request.urlopen(url, timeout=10) as r:
+        data = json.loads(r.read())
+except Exception as e:
+    print('UNREACHABLE:%s' % e); sys.exit(0)
+tags = [m['name'] for m in data.get('models', [])]
+model = os.environ['OPENVIST_MODEL']
+if model in tags:
+    print('OK')
+else:
+    print('NOMODEL:' + ','.join(tags))
+" 2>/dev/null)" || check_out="UNREACHABLE:python failed"
+
+    case "$check_out" in
+        OK)
+            echo "  [ok]   Ollama reachable at $OPENVIST_OLLAMA_URL"
+            echo "  [ok]   model '$OPENVIST_MODEL' available"
+            ;;
+        NOMODEL:*)
+            echo "  [ok]   Ollama reachable at $OPENVIST_OLLAMA_URL"
+            echo "  [FAIL] model '$OPENVIST_MODEL' not found — run: ollama pull $OPENVIST_MODEL"
+            rc=1
+            ;;
+        *)
+            echo "  [FAIL] Ollama not reachable at $OPENVIST_OLLAMA_URL (${check_out#UNREACHABLE:})"
+            rc=1
+            ;;
+    esac
+
+    # Environment variables (informational unless a monitor mode is used)
+    if [[ -z "${LEFT_MON:-}" ]]; then
+        echo "  [warn] LEFT_MON is not set (needed for left/full fallback modes)"
+    else
+        echo "  [ok]   LEFT_MON=$LEFT_MON"
+    fi
+    if [[ -z "${RIGHT_MON:-}" ]]; then
+        echo "  [warn] RIGHT_MON is not set (needed for right mode)"
+    else
+        echo "  [ok]   RIGHT_MON=$RIGHT_MON"
+    fi
+
+    if [[ $rc -eq 0 ]]; then
+        echo "== All checks passed =="
+    else
+        echo "== Some checks failed (see above) =="
+    fi
+    return $rc
+}
+
+# --- argument parsing ------------------------------------------------------
+show_help() {
+    cat <<EOF
+opencode-see v$VERSION — Wayland screenshot + local AI vision analysis.
+
+Usage:
+  opencode-see [mode] [prompt]
+  opencode-see --check
+  opencode-see --version
+  opencode-see --help
+
+Modes:
+  full     Capture all outputs (default)
+  left     Capture LEFT_MON output
+  right    Capture RIGHT_MON output
+  region   Interactively select a region with slurp
+  window   Capture the currently focused Hyprland window
+
+Options:
+  --check      Run a health check of dependencies, Ollama, and config
+  --verbose    Print log output to the console as well as the log file
+  --version    Print version and exit
+  --help       Show this help and exit
+
+Environment variables (override config.json):
+  LEFT_MON            Left monitor name (hyprctl monitors)
+  RIGHT_MON           Right monitor name
+  VISION_MODEL        Ollama vision model (default: $OPENVIST_MODEL)
+  OLLAMA_URL          Ollama API URL (default: $OPENVIST_OLLAMA_URL)
+  VISION_TIMEOUT      Request timeout in seconds (default: $OPENVIST_TIMEOUT)
+  VISION_NUM_CTX      Context window size (default: $OPENVIST_NUM_CTX)
+  OPENVIST_SS_DIR     Screenshot output directory
+  OPENVIST_LOG_FILE   Log file path
+
+Configuration: copy config.example.json to
+  ~/.config/opencode-see/config.json
+EOF
+}
+
+# Pre-scan for global flags before mode parsing.
+for arg in "$@"; do
+    case "$arg" in
+        --verbose|-v) VERBOSE=1 ;;
+    esac
+done
+
+# Handle standalone flags first.
+for arg in "$@"; do
+    case "$arg" in
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        --version)
+            echo "opencode-see $VERSION"
+            exit 0
+            ;;
+        --check)
+            load_config
+            check_health
+            exit $?
+            ;;
+    esac
+done
+
+# Strip --verbose from args so it isn't treated as a prompt.
+set -- "${@/--verbose/}"
+# Remove empty positional args left by the substitution above.
+args=()
+for a in "$@"; do [[ -n "$a" ]] && args+=("$a"); done
+set -- "${args[@]}"
+
+# --- main ------------------------------------------------------------------
+load_config
+apply_env_overrides
+
 MODE="${1:-full}"
 shift 2>/dev/null || true
 PROMPT="${*:-Describe in detail what you see on this computer screen}"
 
-TDIR=$(mktemp -d /tmp/opencode-see-XXX)
-trap "rm -rf '$TDIR'" EXIT
-
-SS_DIR="$HOME/Pictures/opencode-ss"
-mkdir -p "$SS_DIR"
-TS=$(date +%Y%m%d-%H%M%S)
-FNAME="ss-$TS.jpg"
-FPATH="$SS_DIR/$FNAME"
-
+# Validate monitor env vars when needed.
+require_mon() {
+    # require_mon <varname> <mode>
+    local var="$1" mode="$2"
+    if [[ -z "${!var:-}" ]]; then
+        die "$mode mode requires \$$var to be set. Run 'hyprctl monitors' to find the name, then export $var=<name>."
+    fi
+}
 case "$MODE" in
-  region) grim -g "$(slurp)" "$TDIR/s.png" ;;
-  window) grim -g "$(hyprctl activewindow -j | python3 -c "import sys,json;w=json.load(sys.stdin);print(f'{w[\"at\"][0]},{w[\"at\"][1]} {w[\"size\"][0]}x{w[\"size\"][1]}')")" "$TDIR/s.png" ;;
-  left) grim -o "$LEFT_MON" "$TDIR/s.png" ;;
-  right) grim -o "$RIGHT_MON" "$TDIR/s.png" ;;
-  *) grim "$TDIR/s.png" 2>/dev/null || grim -o "$LEFT_MON" "$TDIR/s.png" ;;
+    left)  require_mon LEFT_MON left ;;
+    right) require_mon RIGHT_MON right ;;
 esac
 
-convert "$TDIR/s.png" -resize 1024x1024\> "$FPATH" 2>/dev/null || cp "$TDIR/s.png" "$FPATH"
+# Locate the vision_analyze.py helper next to this script.
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+VISION_PY="${OPENVIST_VISION_PY:-$SCRIPT_DIR/vision_analyze.py}"
+if [[ ! -f "$VISION_PY" ]]; then
+    die "vision_analyze.py not found at $VISION_PY"
+fi
 
-MODEL="${VISION_MODEL:-qwen2.5vl:7b}"
+# Temporary working directory.
+TDIR="$(mktemp -d /tmp/opencode-see-XXX)"
+trap 'rm -rf "$TDIR"' EXIT
 
+mkdir -p "$OPENVIST_SS_DIR"
+TS="$(date +%Y%m%d-%H%M%S)"
+FNAME="ss-$TS.jpg"
+FPATH="$OPENVIST_SS_DIR/$FNAME"
+
+log "INFO" "mode=$MODE prompt=${PROMPT:0:60}... model=$OPENVIST_MODEL"
+
+# --- capture ---------------------------------------------------------------
+capture_geo=""
+case "$MODE" in
+    region)
+        capture_geo="$(slurp)" || die "region selection cancelled"
+        grim -g "$capture_geo" "$TDIR/s.png" || die "grim failed to capture region"
+        ;;
+    window)
+        capture_geo="$(hyprctl activewindow -j | python3 -c "import sys,json
+try:
+    w=json.load(sys.stdin)
+    print(f'{w[\"at\"][0]},{w[\"at\"][1]} {w[\"size\"][0]}x{w[\"size\"][1]}')
+except Exception as e:
+    sys.stderr.write('cannot read active window: %s\n'%e); sys.exit(1)
+")" || die "could not determine active window geometry"
+        grim -g "$capture_geo" "$TDIR/s.png" || die "grim failed to capture window"
+        ;;
+    left)
+        grim -o "$LEFT_MON" "$TDIR/s.png" || die "grim failed to capture $LEFT_MON"
+        ;;
+    right)
+        grim -o "$RIGHT_MON" "$TDIR/s.png" || die "grim failed to capture $RIGHT_MON"
+        ;;
+    full|"")
+        if ! grim "$TDIR/s.png" 2>/dev/null; then
+            if [[ -n "${LEFT_MON:-}" ]]; then
+                grim -o "$LEFT_MON" "$TDIR/s.png" || die "grim failed to capture screen"
+            else
+                die "grim failed to capture full screen and LEFT_MON is not set"
+            fi
+        fi
+        ;;
+    *)
+        die "unknown mode '$MODE'. Valid modes: full left right region window. See --help."
+        ;;
+esac
+
+log "INFO" "captured screenshot to $TDIR/s.png"
+
+# --- resize (ImageMagick, magick preferred over deprecated convert) -------
+if command -v magick &>/dev/null; then
+    magick "$TDIR/s.png" -resize "$OPENVIST_RESIZE" "$FPATH" \
+        || die "magick resize failed"
+elif command -v convert &>/dev/null; then
+    convert "$TDIR/s.png" -resize "$OPENVIST_RESIZE" "$FPATH" \
+        || die "convert resize failed"
+else
+    cp "$TDIR/s.png" "$FPATH" || die "could not save screenshot"
+    log "WARN" "ImageMagick not found; saved full-resolution image"
+fi
+
+# Record latest path for bot integrations.
 LATEST_SS_PATH="${XDG_RUNTIME_DIR:-/tmp}/opencode-latest-ss-path"
 echo "$FPATH" > "$LATEST_SS_PATH"
 echo "Screen capture: $FPATH"
 
-export PYPROMPT="$PROMPT" PYPATH="$FPATH" PYMODEL="$MODEL"
-python3 << 'PYEOF'
-import base64, json, ssl, urllib.request, os
+# --- analyze with Ollama ---------------------------------------------------
+export VISION_MODEL="$OPENVIST_MODEL"
+export OLLAMA_URL="$OPENVIST_OLLAMA_URL"
+export VISION_TIMEOUT="$OPENVIST_TIMEOUT"
+export VISION_NUM_CTX="$OPENVIST_NUM_CTX"
 
-with open(os.environ['PYPATH'], 'rb') as f:
-    b64 = base64.b64encode(f.read()).decode()
+if ! python3 "$VISION_PY" "$FPATH" "$PROMPT"; then
+    die "vision analysis failed — see log: $OPENVIST_LOG_FILE"
+fi
 
-payload = json.dumps({
-    'model': os.environ['PYMODEL'],
-    'prompt': os.environ['PYPROMPT'],
-    'stream': False,
-    'options': {'num_ctx': 4096},
-    'images': [b64]
-}).encode()
-
-req = urllib.request.Request('http://127.0.0.1:11434/api/generate',
-                           data=payload,
-                           headers={'Content-Type': 'application/json'})
-ctx = ssl.create_default_context()
-r = json.loads(urllib.request.urlopen(req, timeout=120, context=ctx).read())
-print(r.get('response', '').strip())
-PYEOF
+log "INFO" "analysis complete for $FPATH"

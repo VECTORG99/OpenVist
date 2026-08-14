@@ -1,0 +1,9 @@
+{
+  "model": "qwen2.5vl:7b",
+  "resize_target": "1024x1024>",
+  "timeout": 120,
+  "ollama_url": "http://127.0.0.1:11434",
+  "num_ctx": 4096,
+  "screenshot_dir": "~/Pictures/opencode-ss",
+  "log_file": "~/.local/share/opencode-see.log"
+}

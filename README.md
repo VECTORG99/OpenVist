@@ -13,7 +13,7 @@ Captura de pantalla remota + análisis con IA local para Wayland/Hyprland.
 - **Python 3**
 
 ```bash
-sudo pacman -S grim slurp imagemagick python hyprutils
+sudo pacman -S grim slurp imagemagick python hyprland
 curl -fsSL https://ollama.com/install.sh | sh
 ```
 
@@ -77,6 +77,60 @@ Las capturas se guardan en `~/Pictures/opencode-ss/`. Un timer de systemd borra 
 ```bash
 systemctl --user status opencode-ss-clean.timer
 ```
+
+## Configuración
+
+Copia el archivo de ejemplo y edita según tus necesidades:
+
+```bash
+mkdir -p ~/.config/opencode-see
+cp config.example.json ~/.config/opencode-see/config.json
+```
+
+```json
+{
+  "model": "qwen2.5vl:7b",
+  "resize_target": "1024x1024>",
+  "timeout": 120,
+  "ollama_url": "http://127.0.0.1:11434",
+  "num_ctx": 4096,
+  "screenshot_dir": "~/Pictures/opencode-ss",
+  "log_file": "~/.local/share/opencode-see.log"
+}
+```
+
+Las variables de entorno tienen prioridad sobre el archivo de configuración.
+
+## Health check
+
+Verifica que todo esté correctamente configurado:
+
+```bash
+opencode-see --check
+```
+
+Revisa dependencias, conectividad con Ollama, disponibilidad del modelo y variables de entorno.
+
+## Troubleshooting
+
+| Problema | Solución |
+|---|---|
+| `ollama: command not found` | Instala Ollama: `curl -fsSL https://ollama.com/install.sh \| sh` |
+| `model 'qwen2.5vl:7b' not found` | Descarga el modelo: `ollama pull qwen2.5vl:7b` |
+| `cannot reach Ollama` | Verifica que Ollama esté corriendo: `ollama serve` |
+| `grim failed to capture` | Verifica que estás en Wayland (no X11) |
+| `LEFT_MON is not set` | Ejecuta `hyprctl monitors` y configura el nombre del monitor |
+| `magick/convert not found` | Instala ImageMagick: `sudo pacman -S imagemagick` |
+| Timeout en el análisis | Aumenta `timeout` en config.json o usa un modelo más pequeño (`qwen2.5vl:3b`) |
+| Log de errores | Revisa `~/.local/share/opencode-see.log` |
+
+## Desinstalación
+
+```bash
+./uninstall.sh
+```
+
+Elimina los scripts, config de systemd timer, y opcionalmente el directorio de capturas.
 
 ## Seguridad
 

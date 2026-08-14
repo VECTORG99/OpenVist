@@ -1,13 +1,26 @@
 /**
- * OpenVist - Discord bot "/see" command
+ * OpenVist - Discord bot "/see" command  (v1.1.0)
  *
  * Integration example for Discord.js bots.
  * Add this file to your bot's commands directory and register it.
+ *
+ * Configuration via environment variables:
+ *   OPENCODE_SEE_PATH  Path to the opencode-see script
+ *                      (default: $HOME/.local/bin/opencode-see)
+ *   OPENCODE_SS_PATH   File that stores the latest screenshot path
+ *                      (default: $XDG_RUNTIME_DIR/opencode-latest-ss-path
+ *                       or /tmp/opencode-latest-ss-path)
  */
 
 import { SlashCommandBuilder } from 'discord.js';
 import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { homedir } from 'node:os';
+
+const SEE_SCRIPT = process.env.OPENCODE_SEE_PATH
+  || `${homedir()}/.local/bin/opencode-see`;
+const SS_PATH_FILE = process.env.OPENCODE_SS_PATH
+  || `${process.env.XDG_RUNTIME_DIR || '/tmp'}/opencode-latest-ss-path`;
 
 export const see = {
   data: new SlashCommandBuilder()
@@ -31,16 +44,15 @@ export const see = {
 
     try {
       const output = execSync(
-        `${process.env.HOME}/.local/bin/opencode-see ${mode}`,
+        `${JSON.stringify(SEE_SCRIPT)} ${mode}`,
         { timeout: 120000, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 }
       );
 
-      const ssPathFile = '/tmp/opencode-latest-ss-path';
       let capPath = null;
 
-      if (existsSync(ssPathFile)) {
-        capPath = readFileSync(ssPathFile, 'utf8').trim();
-        try { unlinkSync(ssPathFile); } catch {}
+      if (existsSync(SS_PATH_FILE)) {
+        capPath = readFileSync(SS_PATH_FILE, 'utf8').trim();
+        try { unlinkSync(SS_PATH_FILE); } catch {}
       }
 
       const lines = output.trim().split('\n');

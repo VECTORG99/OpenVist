@@ -28,6 +28,8 @@ auth.json
 credentials*
 secrets*
 config.local.*
+# User config (copied from config.example.json by install.sh)
+config.json
 
 # Python
 __pycache__/
@@ -37,12 +39,8 @@ __pycache__/
 venv/
 *.egg
 
-# Node
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-package-lock.json
-
 # Screenshots (auto-deleted anyway)
 Pictures/opencode-ss/
+
+# Bats test artifacts
+tests/*.tmp
