@@ -25,12 +25,13 @@ convert "$TDIR/s.png" -resize 1024x1024\> "$FPATH" 2>/dev/null || cp "$TDIR/s.pn
 
 MODEL="${VISION_MODEL:-qwen2.5vl:7b}"
 
-echo "$FPATH" > /tmp/opencode-latest-ss-path
+LATEST_SS_PATH="${XDG_RUNTIME_DIR:-/tmp}/opencode-latest-ss-path"
+echo "$FPATH" > "$LATEST_SS_PATH"
 echo "Screen capture: $FPATH"
 
 export PYPROMPT="$PROMPT" PYPATH="$FPATH" PYMODEL="$MODEL"
 python3 << 'PYEOF'
-import base64, json, urllib.request, os
+import base64, json, ssl, urllib.request, os
 
 with open(os.environ['PYPATH'], 'rb') as f:
     b64 = base64.b64encode(f.read()).decode()
@@ -46,6 +47,7 @@ payload = json.dumps({
 req = urllib.request.Request('http://127.0.0.1:11434/api/generate',
                            data=payload,
                            headers={'Content-Type': 'application/json'})
-r = json.loads(urllib.request.urlopen(req, timeout=120).read())
+ctx = ssl.create_default_context()
+r = json.loads(urllib.request.urlopen(req, timeout=120, context=ctx).read())
 print(r.get('response', '').strip())
 PYEOF
