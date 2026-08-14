@@ -10,10 +10,15 @@ Usage:
     python3 vision_analyze.py <image_path> [prompt]
 
 Environment overrides:
-    OLLAMA_URL       Ollama API base URL (default: http://127.0.0.1:11434)
-    VISION_MODEL     Model name (default: qwen2.5vl:7b)
-    VISION_TIMEOUT   Request timeout in seconds (default: 120)
-    VISION_NUM_CTX   Context window size (default: 4096)
+    OLLAMA_URL            Ollama API base URL (default: http://127.0.0.1:11434)
+    VISION_MODEL          Model name (default: qwen2.5vl:7b)
+    VISION_TIMEOUT        Request timeout in seconds (default: 120)
+    VISION_NUM_CTX        Context window size (default: 4096)
+    OPENVIST_COMPARE_IMAGE  Optional second image path for comparison mode.
+                          When set, both images are sent to the model and the
+                          prompt is framed as a comparison request.
+    OPENVIST_BANNER       Optional footer string appended to the analysis
+                          output (e.g. "Analyzed by OpenVist v1.1.0 | model").
 """
 
 import base64
@@ -66,23 +71,39 @@ def encode_image(path):
         raise RuntimeError(f"could not read image {path}: {exc}")
 
 
-def analyze(image_path, prompt=None, config=None):
+def analyze(image_path, prompt=None, config=None, compare_image=None):
     """
-    Send an image to Ollama and return the model's text description.
+    Send an image (and optionally a second comparison image) to Ollama and
+    return the model's text description.
+
+    When compare_image is given, both images are sent and the prompt is framed
+    as a comparison between the two screenshots.
 
     Raises RuntimeError with a human-readable message on any failure.
     """
     config = config or load_config()
     prompt = prompt or DEFAULT_PROMPT
 
-    b64 = encode_image(image_path)
+    images = [encode_image(image_path)]
+
+    if compare_image:
+        images.append(encode_image(compare_image))
+        prompt = (
+            "I am showing you two screenshots of a computer screen, "
+            "the first one is the earlier state and the second one is the "
+            "current state. Compare them and describe what changed between "
+            "them. Focus on differences: new/removed windows, text changes, "
+            "error messages, cursor position, and any other notable changes. "
+            "If nothing changed, say so.\n\n"
+            f"Additional instructions: {prompt}"
+        )
 
     payload = json.dumps({
         "model": config["model"],
         "prompt": prompt,
         "stream": False,
         "options": {"num_ctx": config["num_ctx"]},
-        "images": [b64],
+        "images": images,
     }).encode()
 
     endpoint = f"{config['url']}/api/generate"
@@ -130,9 +151,10 @@ def main(argv):
 
     image_path = argv[1]
     prompt = " ".join(argv[2:]) if len(argv) > 2 else None
+    compare_image = os.environ.get("OPENVIST_COMPARE_IMAGE") or None
 
     try:
-        result = analyze(image_path, prompt)
+        result = analyze(image_path, prompt, compare_image=compare_image)
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -141,6 +163,9 @@ def main(argv):
         return 1
 
     print(result)
+    banner = os.environ.get("OPENVIST_BANNER")
+    if banner:
+        print(f"\n---\n_{banner}_")
     return 0
 
 

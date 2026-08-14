@@ -1,0 +1,1 @@
+Look for any errors, warnings, or important messages on this screen. Focus on error dialogs, red text, and warning icons.

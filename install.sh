@@ -40,6 +40,11 @@ chmod +x "$HOME/.local/bin/opencode-see"
 cp vision_analyze.py "$HOME/.local/bin/vision_analyze.py"
 chmod +x "$HOME/.local/bin/vision_analyze.py"
 
+# --- prompt templates ------------------------------------------------------
+echo "Installing prompt templates to ~/.local/share/opencode-see/prompts/..."
+mkdir -p "$HOME/.local/share/opencode-see/prompts"
+cp prompts/*.txt "$HOME/.local/share/opencode-see/prompts/"
+
 # --- example config --------------------------------------------------------
 echo "Installing example config to ~/.config/opencode-see/..."
 mkdir -p "$HOME/.config/opencode-see"

@@ -29,6 +29,11 @@ echo "Removing installed scripts..."
 rm -f "$HOME/.local/bin/opencode-see" \
       "$HOME/.local/bin/vision_analyze.py"
 
+# --- prompt templates ------------------------------------------------------
+echo "Removing prompt templates..."
+rm -rf "$HOME/.local/share/opencode-see/prompts"
+rmdir "$HOME/.local/share/opencode-see" 2>/dev/null || true
+
 # --- config ----------------------------------------------------------------
 echo "Removing example config..."
 rm -f "$HOME/.config/opencode-see/config.json"

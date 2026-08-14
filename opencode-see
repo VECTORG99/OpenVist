@@ -7,6 +7,10 @@
 #
 # Usage:
 #   opencode-see [full|left|right|region|window] [prompt...]
+#   opencode-see --prompt-template <name> [mode] [prompt...]
+#   opencode-see --annotate [mode] [prompt...]
+#   opencode-see --compare <path> [mode] [prompt...]
+#   opencode-see --list-models
 #   opencode-see --check
 #   opencode-see --version
 #   opencode-see --help
@@ -27,6 +31,13 @@ OPENVIST_NUM_CTX=4096
 OPENVIST_SS_DIR="$HOME/Pictures/opencode-ss"
 OPENVIST_LOG_FILE="$HOME/.local/share/opencode-see.log"
 
+# Recommended vision models (used by --list-models for annotation).
+readonly -a RECOMMENDED_MODELS=(
+    "qwen2.5vl:7b"
+    "qwen2.5vl:3b"
+    "llama3.2-vision:11b"
+)
+
 # Save original environment overrides before config loading overwrites them.
 _ENV_MODEL="${OPENVIST_MODEL:-}"
 _ENV_RESIZE="${OPENVIST_RESIZE:-}"
@@ -42,6 +53,10 @@ _ENV_VISION_NUM_CTX="${VISION_NUM_CTX:-}"
 
 # --- helpers ---------------------------------------------------------------
 VERBOSE=0
+
+# Script directory (resolved early so helper functions can use it).
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+export SCRIPT_DIR
 
 log() {
     # log <level> <message>
@@ -207,6 +222,143 @@ else:
     return $rc
 }
 
+# --- list available models -------------------------------------------------
+list_models() {
+    apply_env_overrides
+    echo "== Available Ollama models =="
+    local raw
+    raw="$(OPENVIST_OLLAMA_URL="$OPENVIST_OLLAMA_URL" python3 -c "
+import json, os, sys, urllib.request
+url = os.environ['OPENVIST_OLLAMA_URL'].rstrip('/') + '/api/tags'
+try:
+    with urllib.request.urlopen(url, timeout=10) as r:
+        data = json.loads(r.read())
+except Exception as e:
+    print('UNREACHABLE:%s' % e); sys.exit(0)
+for m in data.get('models', []):
+    print(m['name'])
+" 2>/dev/null)" || raw="UNREACHABLE:python failed"
+
+    case "$raw" in
+        UNREACHABLE:*)
+            echo "  [FAIL] Cannot reach Ollama at $OPENVIST_OLLAMA_URL (${raw#UNREACHABLE:})"
+            echo "  Is 'ollama serve' running?"
+            return 1
+            ;;
+    esac
+
+    if [[ -z "$raw" ]]; then
+        echo "  No models installed. Pull one with: ollama pull qwen2.5vl:7b"
+        return 0
+    fi
+
+    echo "  Installed models:"
+    while IFS= read -r model; do
+        local mark=" "
+        local m
+        for m in "${RECOMMENDED_MODELS[@]}"; do
+            if [[ "$model" == "$m" ]]; then
+                mark="*"
+                break
+            fi
+        done
+        printf '  [%s] %s\n' "$mark" "$model"
+    done <<< "$raw"
+
+    echo ""
+    echo "  (*) = recommended vision model for OpenVist"
+    echo "  Recommended vision models:"
+    echo "    qwen2.5vl:7b          — default, good balance of speed and accuracy"
+    echo "    qwen2.5vl:3b          — faster, less accurate"
+    echo "    llama3.2-vision:11b   — alternative, higher accuracy (slower)"
+    echo ""
+    echo "  Pull a model with: ollama pull <name>"
+    return 0
+}
+
+# --- prompt templates ------------------------------------------------------
+# Resolve the prompts/ directory: prefer one next to this script, then the
+# installed copy under ~/.local/share/opencode-see/prompts.
+resolve_prompts_dir() {
+    local dir
+    for dir in \
+        "$SCRIPT_DIR/prompts" \
+        "$HOME/.local/share/opencode-see/prompts"; do
+        if [[ -d "$dir" ]]; then
+            printf '%s' "$dir"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# load_prompt_template <name> -> echoes the template text, exits on error.
+load_prompt_template() {
+    local name="$1"
+    # Strip a leading "prompts/" or trailing ".txt" if the user added them.
+    name="${name#prompts/}"
+    name="${name%.txt}"
+    local pdir
+    if ! pdir="$(resolve_prompts_dir)"; then
+        die "prompts directory not found. Reinstall OpenVist or pass a prompt directly."
+    fi
+    local file="$pdir/$name.txt"
+    if [[ ! -f "$file" ]]; then
+        local available
+        available="$(cd "$pdir" && find . -maxdepth 1 -name '*.txt' -printf '%f\n' 2>/dev/null | sed 's/\.txt$//' | tr '\n' ' ')"
+        die "prompt template '$name' not found at $file. Available: ${available:-none}"
+    fi
+    cat "$file"
+}
+
+# --- annotate screenshot ---------------------------------------------------
+# annotate_image <image_path> <description> -> writes annotated image next to
+# the original (with -annotated suffix) and echoes its path.
+annotate_image() {
+    local image="$1" desc="$2"
+    local magick_cmd=""
+    if command -v magick &>/dev/null; then
+        magick_cmd="magick"
+    elif command -v convert &>/dev/null; then
+        magick_cmd="convert"
+    else
+        log "WARN" "ImageMagick not found; skipping annotation"
+        return 1
+    fi
+
+    local base ext annotated
+    base="${image%.*}"
+    ext="${image##*.}"
+    annotated="${base}-annotated.${ext}"
+
+    # Write description to a temp file to avoid shell-escaping issues.
+    local descfile
+    descfile="$(mktemp /tmp/opencode-annotate-XXX.txt)"
+    printf '%s' "$desc" > "$descfile"
+
+    local width
+    width="$("$magick_cmd" identify -format '%w' "$image" 2>/dev/null)" || width="1024"
+
+    # Build a caption bar (auto-wrapping text) and append it below the image.
+    if ! "$magick_cmd" "$image" \
+            \( -size "${width}x" caption:@"$descfile" \
+               -background black -fill white -font DejaVu-Sans -pointsize 16 \
+               -gravity center -bordercolor black -border 0x8 \) \
+            -append "$annotated" 2>/dev/null; then
+        # Fallback: simpler annotate without caption wrapping.
+        "$magick_cmd" "$image" \
+            -gravity South -background black -splice 0x120 \
+            -fill white -pointsize 16 -annotate +10+30 @"$descfile" \
+            "$annotated" 2>/dev/null || {
+            rm -f "$descfile"
+            log "WARN" "ImageMagick annotation failed; skipping"
+            return 1
+        }
+    fi
+    rm -f "$descfile"
+    printf '%s' "$annotated"
+}
+
 # --- argument parsing ------------------------------------------------------
 show_help() {
     cat <<EOF
@@ -214,6 +366,10 @@ opencode-see v$VERSION — Wayland screenshot + local AI vision analysis.
 
 Usage:
   opencode-see [mode] [prompt]
+  opencode-see --prompt-template <name> [mode] [prompt]
+  opencode-see --annotate [mode] [prompt]
+  opencode-see --compare <path> [mode] [prompt]
+  opencode-see --list-models
   opencode-see --check
   opencode-see --version
   opencode-see --help
@@ -226,10 +382,16 @@ Modes:
   window   Capture the currently focused Hyprland window
 
 Options:
-  --check      Run a health check of dependencies, Ollama, and config
-  --verbose    Print log output to the console as well as the log file
-  --version    Print version and exit
-  --help       Show this help and exit
+  --prompt-template <name>  Load a prompt template from the prompts/ directory
+                            (default, errors, code, debug, ui)
+  --annotate                Overlay the AI description on the screenshot image
+                            (writes <name>-annotated.jpg next to the original)
+  --compare <path>          Compare the new screenshot with an existing image
+  --list-models             List Ollama models and mark recommended vision models
+  --check                   Run a health check of dependencies, Ollama, and config
+  --verbose                 Print log output to the console as well as the log file
+  --version                 Print version and exit
+  --help                    Show this help and exit
 
 Environment variables (override config.json):
   LEFT_MON            Left monitor name (hyprctl monitors)
@@ -269,15 +431,64 @@ for arg in "$@"; do
             check_health
             exit $?
             ;;
+        --list-models)
+            load_config
+            list_models
+            exit $?
+            ;;
     esac
 done
 
-# Strip --verbose from args so it isn't treated as a prompt.
-set -- "${@/--verbose/}"
-# Remove empty positional args left by the substitution above.
-args=()
-for a in "$@"; do [[ -n "$a" ]] && args+=("$a"); done
-set -- "${args[@]}"
+# --- parse options and positionals ------------------------------------------
+# Collect option values and positional args (mode + prompt words), skipping
+# --verbose which is handled by the pre-scan.
+ANNOTATE=0
+COMPARE_PATH=""
+PROMPT_TEMPLATE=""
+positionals=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --verbose|-v)
+            shift
+            ;;
+        --annotate)
+            ANNOTATE=1
+            shift
+            ;;
+        --prompt-template)
+            [[ $# -ge 2 ]] || die "--prompt-template requires a template name argument"
+            PROMPT_TEMPLATE="$2"
+            shift 2
+            ;;
+        --prompt-template=*)
+            PROMPT_TEMPLATE="${1#--prompt-template=}"
+            shift
+            ;;
+        --compare)
+            [[ $# -ge 2 ]] || die "--compare requires a path argument"
+            COMPARE_PATH="$2"
+            shift 2
+            ;;
+        --compare=*)
+            COMPARE_PATH="${1#--compare=}"
+            shift
+            ;;
+        --)
+            shift
+            while [[ $# -gt 0 ]]; do
+                positionals+=("$1")
+                shift
+            done
+            ;;
+        *)
+            positionals+=("$1")
+            shift
+            ;;
+    esac
+done
+
+set -- "${positionals[@]}"
 
 # --- main ------------------------------------------------------------------
 load_config
@@ -285,7 +496,19 @@ apply_env_overrides
 
 MODE="${1:-full}"
 shift 2>/dev/null || true
-PROMPT="${*:-Describe in detail what you see on this computer screen}"
+
+# Build the prompt: a prompt template, explicit prompt args, or the default.
+if [[ -n "$PROMPT_TEMPLATE" ]]; then
+    TEMPLATE_TEXT="$(load_prompt_template "$PROMPT_TEMPLATE")"
+    if [[ $# -gt 0 ]]; then
+        # Allow extra prompt args to augment the template.
+        PROMPT="${TEMPLATE_TEXT} ${*}"
+    else
+        PROMPT="$TEMPLATE_TEXT"
+    fi
+else
+    PROMPT="${*:-Describe in detail what you see on this computer screen}"
+fi
 
 # Validate monitor env vars when needed.
 require_mon() {
@@ -301,7 +524,6 @@ case "$MODE" in
 esac
 
 # Locate the vision_analyze.py helper next to this script.
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 VISION_PY="${OPENVIST_VISION_PY:-$SCRIPT_DIR/vision_analyze.py}"
 if [[ ! -f "$VISION_PY" ]]; then
     die "vision_analyze.py not found at $VISION_PY"
@@ -316,7 +538,7 @@ TS="$(date +%Y%m%d-%H%M%S)"
 FNAME="ss-$TS.jpg"
 FPATH="$OPENVIST_SS_DIR/$FNAME"
 
-log "INFO" "mode=$MODE prompt=${PROMPT:0:60}... model=$OPENVIST_MODEL"
+log "INFO" "mode=$MODE prompt=${PROMPT:0:60}... model=$OPENVIST_MODEL annotate=$ANNOTATE compare=${COMPARE_PATH:-none} template=${PROMPT_TEMPLATE:-none}"
 
 # --- capture ---------------------------------------------------------------
 capture_geo=""
@@ -380,8 +602,37 @@ export OLLAMA_URL="$OPENVIST_OLLAMA_URL"
 export VISION_TIMEOUT="$OPENVIST_TIMEOUT"
 export VISION_NUM_CTX="$OPENVIST_NUM_CTX"
 
-if ! python3 "$VISION_PY" "$FPATH" "$PROMPT"; then
-    die "vision analysis failed — see log: $OPENVIST_LOG_FILE"
+# Comparison mode: validate the second image and pass it through.
+if [[ -n "$COMPARE_PATH" ]]; then
+    if [[ ! -f "$COMPARE_PATH" ]]; then
+        die "comparison image not found: $COMPARE_PATH"
+    fi
+    export OPENVIST_COMPARE_IMAGE="$COMPARE_PATH"
+    log "INFO" "comparison mode: comparing $FPATH with $COMPARE_PATH"
+else
+    unset OPENVIST_COMPARE_IMAGE 2>/dev/null || true
 fi
 
+# Banner footer for Discord/bot context.
+export OPENVIST_BANNER="Analyzed by OpenVist v$VERSION | $OPENVIST_MODEL"
+
+# Capture the analysis output so we can use it for annotation if requested.
+ANALYSIS_OUTPUT=""
+if ! ANALYSIS_OUTPUT="$(python3 "$VISION_PY" "$FPATH" "$PROMPT")"; then
+    die "vision analysis failed — see log: $OPENVIST_LOG_FILE"
+fi
+printf '%s\n' "$ANALYSIS_OUTPUT"
+
 log "INFO" "analysis complete for $FPATH"
+
+# --- annotation mode -------------------------------------------------------
+if [[ "$ANNOTATE" -eq 1 ]]; then
+    # Strip the banner footer from the description before overlaying it.
+    DESC="${ANALYSIS_OUTPUT%%$'\n---'*}"
+    if ANNOTATED_PATH="$(annotate_image "$FPATH" "$DESC")"; then
+        echo "Annotated screenshot: $ANNOTATED_PATH"
+        # Point bot integrations at the annotated version.
+        echo "$ANNOTATED_PATH" > "$LATEST_SS_PATH"
+        log "INFO" "annotated image saved to $ANNOTATED_PATH"
+    fi
+fi

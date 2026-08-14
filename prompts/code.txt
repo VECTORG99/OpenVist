@@ -1,0 +1,1 @@
+This is a code editor or terminal. Describe what code is visible, what language it is, and if there are any syntax errors or issues highlighted.

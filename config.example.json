@@ -5,5 +5,10 @@
   "ollama_url": "http://127.0.0.1:11434",
   "num_ctx": 4096,
   "screenshot_dir": "~/Pictures/opencode-ss",
-  "log_file": "~/.local/share/opencode-see.log"
+  "log_file": "~/.local/share/opencode-see.log",
+  "_recommended_models": {
+    "qwen2.5vl:7b": "Default — good balance of speed and accuracy",
+    "qwen2.5vl:3b": "Faster, less accurate — good for quick checks",
+    "llama3.2-vision:11b": "Alternative vision model — higher accuracy, slower"
+  }
 }
