@@ -16,12 +16,18 @@ fi
 echo "== OpenVist Uninstaller =="
 
 # --- systemd timer ---------------------------------------------------------
-echo "Disabling and removing systemd cleanup timer..."
+echo "Disabling and removing systemd timers..."
 if systemctl --user list-unit-files 2>/dev/null | grep -q opencode-ss-clean.timer; then
     systemctl --user disable --now opencode-ss-clean.timer 2>/dev/null || true
 fi
+if systemctl --user list-unit-files 2>/dev/null | grep -q ollama-check.timer; then
+    systemctl --user disable --now ollama-check.timer 2>/dev/null || true
+fi
 rm -f "$HOME/.config/systemd/user/opencode-ss-clean.timer" \
-      "$HOME/.config/systemd/user/opencode-ss-clean.service"
+      "$HOME/.config/systemd/user/opencode-ss-clean.service" \
+      "$HOME/.config/systemd/user/ollama-check.timer" \
+      "$HOME/.config/systemd/user/ollama-check.service" \
+      "$HOME/.local/share/opencode-see/ollama-check.sh"
 systemctl --user daemon-reload 2>/dev/null || true
 
 # --- installed scripts -----------------------------------------------------
@@ -34,6 +40,10 @@ echo "Removing prompt templates..."
 rm -rf "$HOME/.local/share/opencode-see/prompts"
 rmdir "$HOME/.local/share/opencode-see" 2>/dev/null || true
 
+# --- bash completion -------------------------------------------------------
+echo "Removing bash completion..."
+rm -f "$HOME/.local/share/bash-completion/completions/opencode-see"
+
 # --- config ----------------------------------------------------------------
 echo "Removing example config..."
 rm -f "$HOME/.config/opencode-see/config.json"
@@ -44,11 +54,13 @@ if [[ "$PURGE" -eq 1 ]]; then
     echo "Purging screenshots and logs (--purge)..."
     rm -rf "$HOME/Pictures/opencode-ss"
     rm -f "$HOME/.local/share/opencode-see.log"
+    rm -rf "$HOME/.local/share/opencode-see"
     rm -f "${XDG_RUNTIME_DIR:-/tmp}/opencode-latest-ss-path"
 else
     echo "Left in place (use --purge to remove):"
     echo "  $HOME/Pictures/opencode-ss/"
     echo "  $HOME/.local/share/opencode-see.log"
+    echo "  $HOME/.local/share/opencode-see/ (history)"
 fi
 
 echo ""

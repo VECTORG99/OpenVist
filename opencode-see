@@ -30,6 +30,7 @@ OPENVIST_OLLAMA_URL="http://127.0.0.1:11434"
 OPENVIST_NUM_CTX=4096
 OPENVIST_SS_DIR="$HOME/Pictures/opencode-ss"
 OPENVIST_LOG_FILE="$HOME/.local/share/opencode-see.log"
+OPENVIST_HISTORY_FILE="$HOME/.local/share/opencode-see/history.jsonl"
 
 # Recommended vision models (used by --list-models for annotation).
 readonly -a RECOMMENDED_MODELS=(
@@ -46,6 +47,7 @@ _ENV_OLLAMA_URL="${OPENVIST_OLLAMA_URL:-}"
 _ENV_NUM_CTX="${OPENVIST_NUM_CTX:-}"
 _ENV_SS_DIR="${OPENVIST_SS_DIR:-}"
 _ENV_LOG_FILE="${OPENVIST_LOG_FILE:-}"
+_ENV_HISTORY_FILE="${OPENVIST_HISTORY_FILE:-}"
 _ENV_VISION_MODEL="${VISION_MODEL:-}"
 _ENV_OLLAMA_URL_ALIAS="${OLLAMA_URL:-}"
 _ENV_VISION_TIMEOUT="${VISION_TIMEOUT:-}"
@@ -135,6 +137,7 @@ apply_env_overrides() {
     [[ -n "$_ENV_NUM_CTX" ]]        && OPENVIST_NUM_CTX="$_ENV_NUM_CTX"
     [[ -n "$_ENV_SS_DIR" ]]         && OPENVIST_SS_DIR="$_ENV_SS_DIR"
     [[ -n "$_ENV_LOG_FILE" ]]       && OPENVIST_LOG_FILE="$_ENV_LOG_FILE"
+    [[ -n "$_ENV_HISTORY_FILE" ]]   && OPENVIST_HISTORY_FILE="$_ENV_HISTORY_FILE"
 }
 
 # --- health check ----------------------------------------------------------
@@ -276,6 +279,77 @@ for m in data.get('models', []):
     return 0
 }
 
+# --- history ----------------------------------------------------------------
+# show_history [N] — print the last N analyses from history.jsonl (default 10).
+show_history() {
+    local n="${1:-10}"
+    if ! [[ "$n" =~ ^[0-9]+$ ]] || [[ "$n" -lt 1 ]]; then
+        die "--history expects a positive integer, got '$n'"
+    fi
+    if [[ ! -f "$OPENVIST_HISTORY_FILE" ]]; then
+        echo "No analysis history yet ($OPENVIST_HISTORY_FILE does not exist)."
+        echo "Run 'opencode-see' to capture and analyze a screenshot."
+        return 0
+    fi
+    local lines
+    lines="$(tail -n "$n" "$OPENVIST_HISTORY_FILE" 2>/dev/null)" || true
+    if [[ -z "$lines" ]]; then
+        echo "History is empty."
+        return 0
+    fi
+    # Pretty-print each JSONL entry as a readable summary.
+    python3 -c "
+import json, sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        e = json.loads(line)
+    except Exception:
+        continue
+    ts = e.get('timestamp', '?')
+    model = e.get('model', '?')
+    prompt = e.get('prompt', '')
+    shot = e.get('screenshot', '?')
+    desc = e.get('description', '')
+    print(f'[{ts}] model={model}')
+    print(f'  screenshot: {shot}')
+    print(f'  prompt: {prompt[:80]}')
+    print(f'  description: {desc[:200]}')
+    print()
+" <<< "$lines"
+}
+
+# log_history <screenshot> <model> <prompt> <description>
+# Append a JSONL record (description truncated to 500 chars) to history.jsonl.
+log_history() {
+    local screenshot="$1" model="$2" prompt="$3" description="$4"
+    local hist_dir
+    hist_dir="$(dirname "$OPENVIST_HISTORY_FILE")"
+    mkdir -p "$hist_dir" 2>/dev/null || true
+    # Write the description to a temp file; pass the rest via env vars so that
+    # arbitrary content (quotes, newlines) is safely handled by python3.
+    local descfile
+    descfile="$(mktemp /tmp/opencode-hist-XXX.txt)"
+    printf '%s' "$description" > "$descfile"
+    HIST_SCREENSHOT="$screenshot" HIST_MODEL="$model" HIST_PROMPT="$prompt" \
+        HIST_DESCFILE="$descfile" python3 -c "
+import json, os, datetime
+desc = open(os.environ['HIST_DESCFILE'], encoding='utf-8').read()
+entry = {
+    'timestamp': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+    'model': os.environ['HIST_MODEL'],
+    'prompt': os.environ['HIST_PROMPT'][:1000],
+    'screenshot': os.environ['HIST_SCREENSHOT'],
+    'description': desc[:500],
+}
+print(json.dumps(entry, ensure_ascii=False))
+" >> "$OPENVIST_HISTORY_FILE" 2>/dev/null || \
+        log "WARN" "could not append to history file $OPENVIST_HISTORY_FILE"
+    rm -f "$descfile"
+}
+
 # --- prompt templates ------------------------------------------------------
 # Resolve the prompts/ directory: prefer one next to this script, then the
 # installed copy under ~/.local/share/opencode-see/prompts.
@@ -369,6 +443,12 @@ Usage:
   opencode-see --prompt-template <name> [mode] [prompt]
   opencode-see --annotate [mode] [prompt]
   opencode-see --compare <path> [mode] [prompt]
+  opencode-see --output <path> [mode] [prompt]
+  opencode-see --json [mode] [prompt]
+  opencode-see --quiet [mode] [prompt]
+  opencode-see --dry-run [mode]
+  opencode-see --retry <N> [mode] [prompt]
+  opencode-see --history [N]
   opencode-see --list-models
   opencode-see --check
   opencode-see --version
@@ -387,6 +467,15 @@ Options:
   --annotate                Overlay the AI description on the screenshot image
                             (writes <name>-annotated.jpg next to the original)
   --compare <path>          Compare the new screenshot with an existing image
+  --output <path>           Save the screenshot to this path instead of the
+                            auto-generated timestamped file
+  --json                    Output the result as a JSON object (machine-readable)
+  --quiet                   Suppress all output except the AI description
+  --dry-run                 Capture the screenshot but do not send it to Ollama
+                            (useful for testing the capture pipeline)
+  --retry <N>               Retry the Ollama request up to N times on connection
+                            or timeout errors (default: 1, no retry)
+  --history [N]             Show the last N analyses from history (default: 10)
   --list-models             List Ollama models and mark recommended vision models
   --check                   Run a health check of dependencies, Ollama, and config
   --verbose                 Print log output to the console as well as the log file
@@ -402,9 +491,14 @@ Environment variables (override config.json):
   VISION_NUM_CTX      Context window size (default: $OPENVIST_NUM_CTX)
   OPENVIST_SS_DIR     Screenshot output directory
   OPENVIST_LOG_FILE   Log file path
+  OPENVIST_HISTORY_FILE  Analysis history file (JSONL)
+  OPENVIST_RETRY      Number of Ollama attempts (default: 1)
 
 Configuration: copy config.example.json to
   ~/.config/opencode-see/config.json
+
+History: each analysis is appended (JSONL) to
+  $OPENVIST_HISTORY_FILE
 EOF
 }
 
@@ -445,6 +539,12 @@ done
 ANNOTATE=0
 COMPARE_PATH=""
 PROMPT_TEMPLATE=""
+OUTPUT_PATH=""
+JSON_MODE=0
+QUIET=0
+DRY_RUN=0
+RETRY=""
+HISTORY_N=""
 positionals=()
 
 while [[ $# -gt 0 ]]; do
@@ -474,6 +574,46 @@ while [[ $# -gt 0 ]]; do
             COMPARE_PATH="${1#--compare=}"
             shift
             ;;
+        --output)
+            [[ $# -ge 2 ]] || die "--output requires a file path argument"
+            OUTPUT_PATH="$2"
+            shift 2
+            ;;
+        --output=*)
+            OUTPUT_PATH="${1#--output=}"
+            shift
+            ;;
+        --json)
+            JSON_MODE=1
+            shift
+            ;;
+        --quiet|-q)
+            QUIET=1
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        --retry)
+            [[ $# -ge 2 ]] || die "--retry requires a numeric argument"
+            RETRY="$2"
+            shift 2
+            ;;
+        --retry=*)
+            RETRY="${1#--retry=}"
+            shift
+            ;;
+        --history)
+            shift
+            # Optional numeric argument: consume it only if it looks like a number.
+            if [[ $# -gt 0 && "$1" =~ ^[0-9]+$ ]]; then
+                HISTORY_N="$1"
+                shift
+            else
+                HISTORY_N="10"
+            fi
+            ;;
         --)
             shift
             while [[ $# -gt 0 ]]; do
@@ -493,6 +633,20 @@ set -- "${positionals[@]}"
 # --- main ------------------------------------------------------------------
 load_config
 apply_env_overrides
+
+# --- --history: standalone action, no capture needed -----------------------
+if [[ -n "$HISTORY_N" ]]; then
+    show_history "$HISTORY_N"
+    exit 0
+fi
+
+# --- validate --retry ------------------------------------------------------
+if [[ -n "$RETRY" ]]; then
+    if ! [[ "$RETRY" =~ ^[0-9]+$ ]] || [[ "$RETRY" -lt 1 ]]; then
+        die "--retry expects a positive integer, got '$RETRY'"
+    fi
+    export OPENVIST_RETRY="$RETRY"
+fi
 
 MODE="${1:-full}"
 shift 2>/dev/null || true
@@ -538,7 +692,15 @@ TS="$(date +%Y%m%d-%H%M%S)"
 FNAME="ss-$TS.jpg"
 FPATH="$OPENVIST_SS_DIR/$FNAME"
 
-log "INFO" "mode=$MODE prompt=${PROMPT:0:60}... model=$OPENVIST_MODEL annotate=$ANNOTATE compare=${COMPARE_PATH:-none} template=${PROMPT_TEMPLATE:-none}"
+# --output: use a user-specified screenshot path instead of the timestamped one.
+if [[ -n "$OUTPUT_PATH" ]]; then
+    FPATH="$OUTPUT_PATH"
+    # Ensure the destination directory exists.
+    outdir="$(dirname "$FPATH")"
+    mkdir -p "$outdir" 2>/dev/null || die "cannot create output directory: $outdir"
+fi
+
+log "INFO" "mode=$MODE prompt=${PROMPT:0:60}... model=$OPENVIST_MODEL annotate=$ANNOTATE compare=${COMPARE_PATH:-none} template=${PROMPT_TEMPLATE:-none} output=$FPATH json=$JSON_MODE quiet=$QUIET dry-run=$DRY_RUN retry=${RETRY:-default}"
 
 # --- capture ---------------------------------------------------------------
 capture_geo=""
@@ -594,7 +756,20 @@ fi
 # Record latest path for bot integrations.
 LATEST_SS_PATH="${XDG_RUNTIME_DIR:-/tmp}/opencode-latest-ss-path"
 echo "$FPATH" > "$LATEST_SS_PATH"
-echo "Screen capture: $FPATH"
+
+# --quiet suppresses the informational "Screen capture:" line.
+if [[ "$QUIET" -eq 0 && "$JSON_MODE" -eq 0 ]]; then
+    echo "Screen capture: $FPATH"
+fi
+
+# --- --dry-run: stop here, do not contact Ollama ---------------------------
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "INFO" "dry-run: screenshot captured to $FPATH (Ollama skipped)"
+    if [[ "$QUIET" -eq 0 && "$JSON_MODE" -eq 0 ]]; then
+        echo "Dry run: screenshot saved to $FPATH (Ollama not contacted)."
+    fi
+    exit 0
+fi
 
 # --- analyze with Ollama ---------------------------------------------------
 export VISION_MODEL="$OPENVIST_MODEL"
@@ -613,24 +788,60 @@ else
     unset OPENVIST_COMPARE_IMAGE 2>/dev/null || true
 fi
 
-# Banner footer for Discord/bot context.
-export OPENVIST_BANNER="Analyzed by OpenVist v$VERSION | $OPENVIST_MODEL"
+# Banner footer for Discord/bot context (suppressed in --json and --quiet).
+if [[ "$JSON_MODE" -eq 1 || "$QUIET" -eq 1 ]]; then
+    unset OPENVIST_BANNER 2>/dev/null || true
+else
+    export OPENVIST_BANNER="Analyzed by OpenVist v$VERSION | $OPENVIST_MODEL"
+fi
 
-# Capture the analysis output so we can use it for annotation if requested.
+# Build the vision_analyze.py argument list (including --retry/--json if set).
+VA_ARGS=("$FPATH" "$PROMPT")
+if [[ -n "$RETRY" ]]; then
+    VA_ARGS+=("--retry" "$RETRY")
+fi
+if [[ "$JSON_MODE" -eq 1 ]]; then
+    VA_ARGS+=("--json")
+fi
+
+# Capture the analysis output so we can use it for annotation/history.
 ANALYSIS_OUTPUT=""
-if ! ANALYSIS_OUTPUT="$(python3 "$VISION_PY" "$FPATH" "$PROMPT")"; then
+if ! ANALYSIS_OUTPUT="$(python3 "$VISION_PY" "${VA_ARGS[@]}")"; then
     die "vision analysis failed — see log: $OPENVIST_LOG_FILE"
 fi
+
+# --- --json mode: vision_analyze.py already emitted the JSON object -------
+if [[ "$JSON_MODE" -eq 1 ]]; then
+    printf '%s\n' "$ANALYSIS_OUTPUT"
+    # Extract the description for history logging.
+    DESC_FOR_HISTORY="$(printf '%s' "$ANALYSIS_OUTPUT" | python3 -c "
+import json, sys
+try:
+    print(json.load(sys.stdin).get('description', ''))
+except Exception:
+    pass
+" 2>/dev/null)"
+    log_history "$FPATH" "$OPENVIST_MODEL" "$PROMPT" "$DESC_FOR_HISTORY"
+    log "INFO" "analysis complete for $FPATH (json)"
+    exit 0
+fi
+
 printf '%s\n' "$ANALYSIS_OUTPUT"
+
+# Strip the banner footer to get the raw description for history/annotation.
+DESC="${ANALYSIS_OUTPUT%%$'\n---'*}"
+
+# --- history logging -------------------------------------------------------
+log_history "$FPATH" "$OPENVIST_MODEL" "$PROMPT" "$DESC"
 
 log "INFO" "analysis complete for $FPATH"
 
 # --- annotation mode -------------------------------------------------------
 if [[ "$ANNOTATE" -eq 1 ]]; then
-    # Strip the banner footer from the description before overlaying it.
-    DESC="${ANALYSIS_OUTPUT%%$'\n---'*}"
     if ANNOTATED_PATH="$(annotate_image "$FPATH" "$DESC")"; then
-        echo "Annotated screenshot: $ANNOTATED_PATH"
+        if [[ "$QUIET" -eq 0 ]]; then
+            echo "Annotated screenshot: $ANNOTATED_PATH"
+        fi
         # Point bot integrations at the annotated version.
         echo "$ANNOTATED_PATH" > "$LATEST_SS_PATH"
         log "INFO" "annotated image saved to $ANNOTATED_PATH"

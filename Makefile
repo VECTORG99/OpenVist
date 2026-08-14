@@ -12,7 +12,7 @@
 SHELL := /bin/bash
 
 # Scripts to lint with shellcheck.
-SH_SCRIPTS := opencode-see install.sh uninstall.sh
+SH_SCRIPTS := opencode-see install.sh uninstall.sh opencode-see-completion.bash ollama-check.sh
 
 # Python files to syntax-check.
 PY_FILES := vision_analyze.py

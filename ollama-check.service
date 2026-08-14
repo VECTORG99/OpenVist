@@ -1,0 +1,9 @@
+[Unit]
+Description=Check that Ollama is running, start it if not
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# %h expands to the user's home directory.
+ExecStart=%h/.local/share/opencode-see/ollama-check.sh

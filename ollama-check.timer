@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodically check that Ollama is running
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=ollama-check.service
+
+[Install]
+WantedBy=timers.target

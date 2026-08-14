@@ -69,3 +69,50 @@ load test_helper
     [ "$status" -ne 0 ]
     rm -f "$img"
 }
+
+@test "vision_analyze.py --retry requires a numeric argument" {
+    local img
+    img="$(make_test_image)"
+    run env OLLAMA_URL="http://127.0.0.1:1" python3 "$VISION_PY" "$img" "describe" --retry
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--retry requires a numeric argument"* ]]
+    rm -f "$img"
+}
+
+@test "vision_analyze.py --retry with non-integer errors" {
+    local img
+    img="$(make_test_image)"
+    run env OLLAMA_URL="http://127.0.0.1:1" python3 "$VISION_PY" "$img" "describe" --retry abc
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--retry expects an integer"* ]]
+    rm -f "$img"
+}
+
+@test "vision_analyze.py --retry retries connection errors and mentions attempts" {
+    local img
+    img="$(make_test_image)"
+    # Port 1 refuses instantly; with --retry 2 we should see a retry warning.
+    run env OLLAMA_URL="http://127.0.0.1:1" python3 "$VISION_PY" "$img" "describe" --retry 2
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Retrying in"* ]]
+    [[ "$output" == *"attempt 1/2"* ]]
+    rm -f "$img"
+}
+
+@test "vision_analyze.py --json on failure does not emit JSON" {
+    local img
+    img="$(make_test_image)"
+    run env OLLAMA_URL="http://127.0.0.1:1" python3 "$VISION_PY" "$img" "describe" --json
+    [ "$status" -ne 0 ]
+    # On failure the plain error message is printed, not a JSON object.
+    [[ "$output" != "{*" ]]
+    [[ "$output" == *"Ollama"* ]]
+    rm -f "$img"
+}
+
+@test "vision_analyze.py --help documents --retry and --json" {
+    run python3 "$VISION_PY" --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--retry"* ]]
+    [[ "$output" == *"--json"* ]]
+}
